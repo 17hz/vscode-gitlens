@@ -1,4 +1,4 @@
-import type { ColorTheme, ConfigurationChangeEvent, Uri } from 'vscode';
+import type { CancellationToken, ColorTheme, ConfigurationChangeEvent, Uri } from 'vscode';
 import { CancellationTokenSource, Disposable, env, window } from 'vscode';
 import type { CreatePullRequestActionContext, OpenPullRequestActionContext } from '../../../api/gitlens';
 import { getAvatarUri } from '../../../avatars';
@@ -36,6 +36,7 @@ import * as StashActions from '../../../git/actions/stash';
 import * as TagActions from '../../../git/actions/tag';
 import * as WorktreeActions from '../../../git/actions/worktree';
 import { GitSearchError } from '../../../git/errors';
+import { CommitFormatter } from '../../../git/formatters/commitFormatter';
 import { getBranchId, getBranchNameWithoutRemote, getRemoteNameFromBranchName } from '../../../git/models/branch';
 import type { GitCommit } from '../../../git/models/commit';
 import { uncommitted } from '../../../git/models/constants';
@@ -68,6 +69,7 @@ import {
 import type { GitSearch } from '../../../git/search';
 import { getSearchQueryComparisonKey } from '../../../git/search';
 import { showRepositoryPicker } from '../../../quickpicks/repositoryPicker';
+import { pauseOnCancelOrTimeoutMapTuplePromise } from '../../../system/cancellation';
 import { executeActionCommand, executeCommand, executeCoreCommand, registerCommand } from '../../../system/command';
 import { configuration } from '../../../system/configuration';
 import { getContext, onDidChangeContext } from '../../../system/context';
@@ -88,6 +90,7 @@ import { isSerializedState } from '../../../webviews/webviewsController';
 import type { SubscriptionChangeEvent } from '../../gk/account/subscriptionService';
 import type {
 	BranchState,
+	DidGetRowHoverParams,
 	DidSearchParams,
 	DoubleClickedParams,
 	GetMissingAvatarsParams,
@@ -158,6 +161,7 @@ import {
 	GetMissingAvatarsCommand,
 	GetMissingRefsMetadataCommand,
 	GetMoreRowsCommand,
+	GetRowHoverRequest,
 	OpenPullRequestDetailsCommand,
 	SearchOpenInViewCommand,
 	SearchRequest,
@@ -634,6 +638,9 @@ export class GraphWebviewProvider implements WebviewProvider<State, State, Graph
 			case GetMoreRowsCommand.is(e):
 				void this.onGetMoreRows(e.params);
 				break;
+			case GetRowHoverRequest.is(e):
+				void this.onHoverRowRequest(GetRowHoverRequest, e);
+				break;
 			case OpenPullRequestDetailsCommand.is(e):
 				void this.onOpenPullRequestDetails(e.params);
 				break;
@@ -910,6 +917,91 @@ export class GraphWebviewProvider implements WebviewProvider<State, State, Graph
 		}
 
 		return Promise.resolve();
+	}
+
+	private _hoverCache = new Map<string, Promise<string | undefined>>();
+	private _hoverCancellation: CancellationTokenSource | undefined;
+
+	private async onHoverRowRequest<T extends typeof GetRowHoverRequest>(requestType: T, msg: IpcCallMessageType<T>) {
+		const hover: DidGetRowHoverParams = {
+			id: msg.params.id,
+			markdown: undefined,
+		};
+
+		if (this._hoverCancellation != null) {
+			this._hoverCancellation.cancel();
+		}
+
+		if (this._graph != null) {
+			const sha = msg.params.id === 'work-dir-changes' ? uncommitted : msg.params.id;
+
+			let markdown = this._hoverCache.get(sha);
+			if (markdown == null) {
+				const cancellation = new CancellationTokenSource();
+				this._hoverCancellation = cancellation;
+
+				markdown = this.getCommitTooltip(this._graph.repoPath, sha, cancellation.token).catch(() => {
+					this._hoverCache.delete(sha);
+					return undefined;
+				});
+				this._hoverCache.set(sha, markdown);
+			}
+
+			hover.markdown = await markdown;
+		}
+
+		void this.host.respond(requestType, msg, hover);
+	}
+
+	private async getCommitTooltip(repoPath: string, sha: string, cancellation: CancellationToken) {
+		const commit = await this.container.git.getCommit(repoPath, sha);
+		if (commit == null) return undefined;
+
+		const [remotesResult, _] = await Promise.allSettled([
+			this.container.git.getBestRemotesWithProviders(commit.repoPath),
+			commit.message == null ? commit.ensureFullDetails() : undefined,
+		]);
+
+		if (cancellation.isCancellationRequested) throw new CancellationError();
+
+		const remotes = getSettledValue(remotesResult, []);
+		const [remote] = remotes;
+
+		let enrichedAutolinks;
+		let pr;
+
+		if (remote?.hasIntegration()) {
+			const [enrichedAutolinksResult, prResult] = await Promise.allSettled([
+				pauseOnCancelOrTimeoutMapTuplePromise(commit.getEnrichedAutolinks(remote), cancellation),
+				commit.getAssociatedPullRequest(remote),
+			]);
+
+			if (cancellation.isCancellationRequested) throw new CancellationError();
+
+			const enrichedAutolinksMaybeResult = getSettledValue(enrichedAutolinksResult);
+			if (!enrichedAutolinksMaybeResult?.paused) {
+				enrichedAutolinks = enrichedAutolinksMaybeResult?.value;
+			}
+			pr = getSettledValue(prResult);
+		}
+
+		const tooltip = await CommitFormatter.fromTemplateAsync(
+			configuration.get('views.formats.commits.tooltip'),
+			commit,
+			{
+				enrichedAutolinks: enrichedAutolinks,
+				dateFormat: configuration.get('defaultDateFormat'),
+				// getBranchAndTagTips: this.getBranchAndTagTips,
+				messageAutolinks: true,
+				messageIndent: 4,
+				pullRequest: pr,
+				outputFormat: 'markdown',
+				remotes: remotes,
+				// unpublished: this.unpublished,
+			},
+		);
+
+		return tooltip;
 	}
 
 	@debug()

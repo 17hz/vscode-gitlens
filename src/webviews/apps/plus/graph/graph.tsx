@@ -38,6 +38,7 @@ import {
 	GetMissingAvatarsCommand,
 	GetMissingRefsMetadataCommand,
 	GetMoreRowsCommand,
+	GetRowHoverRequest,
 	OpenPullRequestDetailsCommand,
 	SearchOpenInViewCommand,
 	SearchRequest,
@@ -106,6 +107,7 @@ export class GraphApp extends App<State> {
 					onChooseRepository={debounce<GraphApp['onChooseRepository']>(() => this.onChooseRepository(), 250)}
 					onDoubleClickRef={(ref, metadata) => this.onDoubleClickRef(ref, metadata)}
 					onDoubleClickRow={(row, preserveFocus) => this.onDoubleClickRow(row, preserveFocus)}
+					onHoverRowPromise={(row: GraphRow) => this.onHoverRowPromise(row)}
 					onMissingAvatars={(...params) => this.onGetMissingAvatars(...params)}
 					onMissingRefsMetadata={(...params) => this.onGetMissingRefsMetadata(...params)}
 					onMoreRows={(...params) => this.onGetMoreRows(...params)}
@@ -549,6 +551,14 @@ export class GraphApp extends App<State> {
 			row: { id: row.sha, type: row.type as GitGraphRowType },
 			preserveFocus: preserveFocus,
 		});
+	}
+
+	private async onHoverRowPromise(row: GraphRow) {
+		try {
+			return await this.sendRequest(GetRowHoverRequest, { type: row.type as GitGraphRowType, id: row.sha });
+		} catch {
+			return undefined;
+		}
 	}
 
 	private onGetMissingAvatars(emails: GraphAvatars) {

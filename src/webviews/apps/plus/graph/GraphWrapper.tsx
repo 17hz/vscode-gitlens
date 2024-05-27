@@ -23,6 +23,7 @@ import type { FocusCommandArgs } from '../../../../plus/focus/focus';
 import type { Subscription } from '../../../../plus/gk/account/subscription';
 import type {
 	DidEnsureRowParams,
+	DidGetRowHoverParams,
 	DidSearchParams,
 	GraphAvatars,
 	GraphColumnName,
@@ -72,6 +73,7 @@ import { GlSearchBox } from '../../shared/components/search/react';
 import type { SearchNavigationEventDetail } from '../../shared/components/search/search-box';
 import type { DateTimeFormat } from '../../shared/date';
 import { formatDate, fromNow } from '../../shared/date';
+import { GlGraphHover } from './hover/graphHover.react';
 import type { GraphMinimapDaySelectedEventDetail } from './minimap/minimap';
 import { GlGraphMinimapContainer } from './minimap/minimap-container.react';
 
@@ -84,6 +86,7 @@ export interface GraphWrapperProps {
 	onDimMergeCommits?: (dim: boolean) => void;
 	onDoubleClickRef?: (ref: GraphRef, metadata?: GraphRefMetadataItem) => void;
 	onDoubleClickRow?: (row: GraphRow, preserveFocus?: boolean) => void;
+	onHoverRowPromise?: (row: GraphRow) => Promise<DidGetRowHoverParams | undefined>;
 	onMissingAvatars?: (emails: Record<string, string>) => void;
 	onMissingRefsMetadata?: (metadata: GraphMissingRefsMetadata) => void;
 	onMoreRows?: (id?: string) => void;
@@ -208,6 +211,7 @@ export function GraphWrapper({
 	onDoubleClickRef,
 	onDoubleClickRow,
 	onEnsureRowPromise,
+	onHoverRowPromise,
 	onMissingAvatars,
 	onMissingRefsMetadata,
 	onMoreRows,
@@ -269,6 +273,7 @@ export function GraphWrapper({
 	);
 
 	const minimap = useRef<GlGraphMinimapContainer | undefined>(undefined);
+	const hover = useRef<GlGraphHover | undefined>(undefined);
 
 	const ensuredIds = useRef<Set<string>>(new Set());
 	const ensuredSkippedIds = useRef<Set<string>>(new Set());
@@ -302,6 +307,7 @@ export function GraphWrapper({
 				setContext(state.context);
 				break;
 			case DidChangeRowsNotification:
+				hover.current?.reset();
 				setRows(state.rows ?? []);
 				setRowsStats(state.rowsStats);
 				setRowsStatsLoading(state.rowsStatsLoading);
@@ -346,6 +352,7 @@ export function GraphWrapper({
 				setLastFetched(state.lastFetched);
 				break;
 			default: {
+				hover.current?.reset();
 				setAllowed(state.allowed ?? false);
 				if (!themingChanged) {
 					setStyleProps(state.theming);
@@ -466,14 +473,56 @@ export function GraphWrapper({
 		}
 	};
 
-	const handleOnGraphMouseLeave = (_event: any) => {
+	const handleOnGraphMouseLeave = (_event: React.MouseEvent<any>) => {
 		minimap.current?.unselect(undefined, true);
 	};
 
-	const handleOnGraphRowHovered = (_event: any, graphZoneType: GraphZoneType, graphRow: GraphRow) => {
-		if (graphZoneType === refZone || minimap.current == null) return;
+	const handleOnGraphRowHovered = (
+		event: React.MouseEvent<any>,
+		graphZoneType: GraphZoneType,
+		graphRow: GraphRow,
+	) => {
+		if (graphZoneType === refZone) return;
 
 		minimap.current?.select(graphRow.date, true);
+
+		if (onHoverRowPromise == null) return;
+
+		const hoverComponent = hover.current;
+		if (hoverComponent == null) return;
+
+		const { clientX } = event;
+
+		const rect = event.currentTarget.getBoundingClientRect() as DOMRect;
+		const y = rect.top + rect.height / 2;
+
+		const anchor = {
+			getBoundingClientRect: function () {
+				return {
+					width: 0,
+					height: 0,
+					x: clientX,
+					y: y,
+					top: y,
+					left: clientX,
+					right: clientX,
+					bottom: y,
+				};
+			},
+		};
+
+		hoverComponent.requestMarkdown ??= onHoverRowPromise;
+		hoverComponent.onRowHovered(graphRow, anchor);
+	};
+
+	const handleOnGraphRowUnhovered = (
+		event: React.MouseEvent<any>,
+		graphZoneType: GraphZoneType,
+		graphRow: GraphRow,
+	) => {
+		if (graphZoneType === refZone) return;
+
+		hover.current?.onRowUnhovered(graphRow, event.relatedTarget);
 	};
 
 	useEffect(() => {
@@ -1434,6 +1483,7 @@ export function GraphWrapper({
 				visibleDays={visibleDays}
 				onSelected={e => handleOnMinimapDaySelected(e)}
 			></GlGraphMinimapContainer>
+			<GlGraphHover ref={hover as any} id="commit-hover" distance={15} placement="right-start"></GlGraphHover>
 			<main id="main" className="graph-app__main" aria-hidden={!allowed}>
 				{repo !== undefined ? (
 					<>
@@ -1470,8 +1520,9 @@ export function GraphWrapper({
 							onDoubleClickGraphRow={handleOnDoubleClickRow}
 							onDoubleClickGraphRef={handleOnDoubleClickRef}
 							onGraphColumnsReOrdered={handleOnGraphColumnsReOrdered}
-							onGraphMouseLeave={minimap.current ? handleOnGraphMouseLeave : undefined}
-							onGraphRowHovered={minimap.current ? handleOnGraphRowHovered : undefined}
+							onGraphMouseLeave={handleOnGraphMouseLeave}
+							onGraphRowHovered={handleOnGraphRowHovered}
+							onGraphRowUnhovered={handleOnGraphRowUnhovered}
 							onRowContextMenu={handleRowContextMenu}
 							onSettingsClick={handleToggleColumnSettings}
 							onSelectGraphRows={handleSelectGraphRows}
