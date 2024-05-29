@@ -3,27 +3,24 @@ import { customElement, property } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { until } from 'lit/directives/until.js';
 import { marked } from 'marked';
+import type { ThemeIcon } from 'vscode';
 
 @customElement('gl-markdown')
 export class GLMarkdown extends LitElement {
 	static override styles = css`
-		a {
+		a,
+		a code {
+			text-decoration: none;
+			color: var(--vscode-textLink-foreground);
 		}
+
+		a:hover,
+		a:hover code {
+			color: var(--vscode-textLink-activeForeground);
+		}
+
 		a:hover:not(.disabled) {
 			cursor: pointer;
-		}
-
-		.hover-contents:not(.html-hover-contents) {
-			padding: 4px 8px;
-		}
-
-		.markdown-hover > .hover-contents:not(.code-hover-contents) {
-			max-width: var(--vscode-hover-maxWidth, 500px);
-			word-wrap: break-word;
-		}
-
-		.markdown-hover > .hover-contents:not(.code-hover-contents) hr {
-			min-width: 100%;
 		}
 
 		p,
@@ -48,18 +45,21 @@ export class GLMarkdown extends LitElement {
 		}
 
 		code {
-			font-family: var(--monaco-monospace-font);
+			background: var(--vscode-textCodeBlock-background);
+			border-radius: 3px;
+			padding: 0px 4px 2px 4px;
+			font-family: var(--vscode-editor-font-family);
+		}
+
+		code code-icon {
+			color: inherit;
+			font-size: inherit;
+			vertical-align: middle;
 		}
 
 		hr {
-			box-sizing: border-box;
-			border-left: 0px;
-			border-right: 0px;
-			margin-top: 4px;
-			margin-bottom: -4px;
-			margin-left: -8px;
-			margin-right: -8px;
-			height: 1px;
+			border: none;
+			border-top: 1px solid var(--color-foreground--25);
 		}
 
 		p:first-child,
@@ -89,69 +89,10 @@ export class GLMarkdown extends LitElement {
 		li > ul {
 			margin-top: 0;
 		}
-
-		code {
-			border-radius: 3px;
-			padding: 0 0.4em;
-		}
-
-		.monaco-tokenized-source {
-			white-space: var(--vscode-hover-sourceWhiteSpace, pre-wrap);
-		}
-
-		.markdown-hover .hover-contents .codicon {
-			color: inherit;
-			font-size: inherit;
-			vertical-align: middle;
-		}
-
-		.hover-contents a.code-link:hover,
-		.hover-contents a.code-link {
-			color: inherit;
-		}
-
-		.hover-contents a.code-link:before {
-			content: '(';
-		}
-
-		.hover-contents a.code-link:after {
-			content: ')';
-		}
-
-		a {
-			text-decoration: underline;
-			color: var(--vscode-textLink-foreground);
-		}
-
-		a:hover {
-			color: var(--vscode-textLink-activeForeground);
-		}
-
-		a code {
-			text-decoration: underline;
-			/** Hack to force underline to show **/
-			border-bottom: 1px solid transparent;
-			text-underline-position: under;
-			color: var(--vscode-textLink-foreground);
-		}
-
-		a:hover code {
-			color: var(--vscode-textLink-activeForeground);
-		}
-
-		/** Spans in markdown hovers need a margin-bottom to avoid looking cramped: https://github.com/microsoft/vscode/issues/101496 **/
-		.markdown-hover .hover-contents:not(.code-hover-contents):not(.html-hover-contents) span {
-			margin-bottom: 4px;
-			display: inline-block;
-		}
 	`;
 
 	@property({ type: String })
 	private markdown = '';
-
-	// protected override createRenderRoot(): HTMLElement | DocumentFragment {
-	// 	return this;
-	// }
 
 	override render() {
 		return html`${this.markdown ? until(this.renderMarkdown(this.markdown), 'Loading...') : ''}`;
@@ -166,7 +107,8 @@ export class GLMarkdown extends LitElement {
 
 		marked.use({ renderer: getMarkdownRenderer() });
 
-		const rendered = await marked.parse(markdown);
+		let rendered = await marked.parse(markdownEscapeEscapedIcons(markdown));
+		rendered = renderThemeIconsWithinText(rendered);
 		return unsafeHTML(rendered);
 	}
 }
@@ -211,4 +153,48 @@ function getMarkdownRenderer() {
 			return `<code>${code}</code>`;
 		},
 	};
+}
+
+const themeIconNameExpression = '[A-Za-z0-9-]+';
+const themeIconModifierExpression = '~[A-Za-z]+';
+const themeIconIdRegex = new RegExp(`^(${themeIconNameExpression})(${themeIconModifierExpression})?$`);
+const themeIconsRegex = new RegExp(`\\$\\(${themeIconNameExpression}(?:${themeIconModifierExpression})?\\)`, 'g');
+const themeIconsMarkdownEscapedRegex = new RegExp(`\\\\${themeIconsRegex.source}`, 'g');
+const themeIconsWithinTextRegex = new RegExp(
+	`(\\\\)?\\$\\((${themeIconNameExpression}(?:${themeIconModifierExpression})?)\\)`,
+	'g',
+);
+
+export function markdownEscapeEscapedIcons(text: string): string {
+	// Need to add an extra \ for escaping in markdown
+	return text.replace(themeIconsMarkdownEscapedRegex, match => `\\${match}`);
+}
+
+export function renderThemeIconsWithinText(text: string): string {
+	const elements: string[] = [];
+	let match: RegExpExecArray | null;
+
+	let textStart = 0;
+	let textStop = 0;
+	while ((match = themeIconsWithinTextRegex.exec(text)) !== null) {
+		textStop = match.index || 0;
+		if (textStart < textStop) {
+			elements.push(text.substring(textStart, textStop));
+		}
+		textStart = (match.index || 0) + match[0].length;
+
+		const [, escaped, codicon] = match;
+		elements.push(escaped ? `$(${codicon})` : renderThemeIcon({ id: codicon }));
+	}
+
+	if (textStart < text.length) {
+		elements.push(text.substring(textStart));
+	}
+	return elements.join('');
+}
+
+export function renderThemeIcon(icon: ThemeIcon): string {
+	const match = themeIconIdRegex.exec(icon.id);
+	const [, id, modifier] = match ?? [undefined, 'error', undefined];
+	return /*html*/ `<code-icon icon="${id}"${modifier ? ` modifier="$.modifier}"` : ''}></code-icon>`;
 }
