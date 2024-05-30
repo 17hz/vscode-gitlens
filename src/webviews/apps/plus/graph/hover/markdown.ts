@@ -2,6 +2,7 @@ import { css, html, LitElement } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { until } from 'lit/directives/until.js';
+import type { RendererObject } from 'marked';
 import { marked } from 'marked';
 import type { ThemeIcon } from 'vscode';
 
@@ -113,7 +114,7 @@ export class GLMarkdown extends LitElement {
 	}
 }
 
-function getMarkdownRenderer() {
+function getMarkdownRenderer(): RendererObject {
 	return {
 		// heading: function (text: string, level: number, raw: string, slugger: any): string {
 		// 	level = Math.min(6, level);
@@ -142,6 +143,54 @@ function getMarkdownRenderer() {
 		// 			${content}
 		// 		</h${level}>`;
 		// },
+		image: (href: string | null, title: string | null, text: string): string => {
+			let dimensions: string[] = [];
+			let attributes: string[] = [];
+			if (href) {
+				({ href, dimensions } = parseHrefAndDimensions(href));
+				attributes.push(`src="${escapeDoubleQuotes(href)}"`);
+			}
+			if (text) {
+				attributes.push(`alt="${escapeDoubleQuotes(text)}"`);
+			}
+			if (title) {
+				attributes.push(`title="${escapeDoubleQuotes(title)}"`);
+			}
+			if (dimensions.length) {
+				attributes = attributes.concat(dimensions);
+			}
+			return `<img ${attributes.join(' ')}>`;
+		},
+
+		paragraph: (text: string): string => {
+			return `<p>${text}</p>`;
+		},
+
+		link: (href: string, title: string | null | undefined, text: string): string | false => {
+			if (typeof href !== 'string') {
+				return '';
+			}
+
+			// Remove markdown escapes. Workaround for https://github.com/chjj/marked/issues/829
+			if (href === text) {
+				// raw link case
+				text = removeMarkdownEscapes(text);
+			}
+
+			title = typeof title === 'string' ? escapeDoubleQuotes(removeMarkdownEscapes(title)) : '';
+			href = removeMarkdownEscapes(href);
+
+			// HTML Encode href
+			href = href
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;')
+				.replace(/"/g, '&quot;')
+				.replace(/'/g, '&#39;');
+
+			return `<a href="${href}" title="${title || href}" draggable="false">${text}</a>`;
+		},
+
 		code: function (code: string, infostring: string | undefined, _escaped: boolean): string {
 			// Remote code may include characters that need to be escaped to be visible in HTML
 			code = code.replace(/</g, '&lt;');
@@ -165,12 +214,34 @@ const themeIconsWithinTextRegex = new RegExp(
 	'g',
 );
 
-export function markdownEscapeEscapedIcons(text: string): string {
+function markdownEscapeEscapedIcons(text: string): string {
 	// Need to add an extra \ for escaping in markdown
 	return text.replace(themeIconsMarkdownEscapedRegex, match => `\\${match}`);
 }
 
-export function renderThemeIconsWithinText(text: string): string {
+function parseHrefAndDimensions(href: string): { href: string; dimensions: string[] } {
+	const dimensions: string[] = [];
+	const splitted = href.split('|').map(s => s.trim());
+	href = splitted[0];
+	const parameters = splitted[1];
+	if (parameters) {
+		const heightFromParams = /height=(\d+)/.exec(parameters);
+		const widthFromParams = /width=(\d+)/.exec(parameters);
+		const height = heightFromParams ? heightFromParams[1] : '';
+		const width = widthFromParams ? widthFromParams[1] : '';
+		const widthIsFinite = isFinite(parseInt(width));
+		const heightIsFinite = isFinite(parseInt(height));
+		if (widthIsFinite) {
+			dimensions.push(`width="${width}"`);
+		}
+		if (heightIsFinite) {
+			dimensions.push(`height="${height}"`);
+		}
+	}
+	return { href: href, dimensions: dimensions };
+}
+
+function renderThemeIconsWithinText(text: string): string {
 	const elements: string[] = [];
 	let match: RegExpExecArray | null;
 
@@ -193,8 +264,19 @@ export function renderThemeIconsWithinText(text: string): string {
 	return elements.join('');
 }
 
-export function renderThemeIcon(icon: ThemeIcon): string {
+function renderThemeIcon(icon: ThemeIcon): string {
 	const match = themeIconIdRegex.exec(icon.id);
 	const [, id, modifier] = match ?? [undefined, 'error', undefined];
 	return /*html*/ `<code-icon icon="${id}"${modifier ? ` modifier="$.modifier}"` : ''}></code-icon>`;
+}
+
+function escapeDoubleQuotes(input: string) {
+	return input.replace(/"/g, '&quot;');
+}
+
+function removeMarkdownEscapes(text: string): string {
+	if (!text) {
+		return text;
+	}
+	return text.replace(/\\([\\`*_{}[\]()#+\-.!~])/g, '$1');
 }
